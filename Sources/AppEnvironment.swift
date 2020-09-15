@@ -78,7 +78,7 @@ public struct AppEnvironment {
 
 extension AppEnvironment {
     private static let isAppEncrypted: Bool = {
-        guard let executableHeader = (UInt32(0) ..< _dyld_image_count())
+        guard let header = (UInt32(0) ..< _dyld_image_count())
             .lazy
             .compactMap(_dyld_get_image_header)
             .filter({ MH_EXECUTE == $0.pointee.filetype })
@@ -87,23 +87,25 @@ extension AppEnvironment {
             return false
         }
 
-        let is64bit = MH_MAGIC_64 == executableHeader.pointee.magic
-        let stepSize = is64bit ? MemoryLayout<mach_header_64>.stride : MemoryLayout<mach_header>.stride
-        var cursor = executableHeader.advanced(by: stepSize)
+        let is64Bit = [MH_MAGIC_64, MH_CIGAM_64].contains(header.pointee.magic)
+        let stepSize = is64Bit ? MemoryLayout<mach_header_64>.stride : MemoryLayout<mach_header>.stride
+        var cursor = header.withMemoryRebound(to: UInt8.self, capacity: 1, { $0 }) + stepSize
 
-        for _ in UInt32(0) ..< executableHeader.pointee.ncmds {
-            let segmentCommand = cursor.withMemoryRebound(to: segment_command.self, capacity: 1, { $0 })
+        var index: UInt32 = 0
+        while index < header.pointee.ncmds {
+            let segCmd = cursor.withMemoryRebound(to: segment_command.self, capacity: 1, { $0.pointee })
 
-            if is64bit && segmentCommand.pointee.cmd == LC_ENCRYPTION_INFO_64 {
-                let cryptCmd = segmentCommand.withMemoryRebound(to: encryption_info_command_64.self, capacity: 1, { $0.pointee })
+            if is64Bit && segCmd.cmd == LC_ENCRYPTION_INFO_64 {
+                let cryptCmd = cursor.withMemoryRebound(to: encryption_info_command_64.self, capacity: 1, { $0.pointee })
                 return 0 != cryptCmd.cryptid
             }
-            if !is64bit && segmentCommand.pointee.cmd == LC_ENCRYPTION_INFO {
-                let cryptCmd = segmentCommand.withMemoryRebound(to: encryption_info_command.self, capacity: 1, { $0.pointee })
+            if !is64Bit && segCmd.cmd == LC_ENCRYPTION_INFO {
+                let cryptCmd = cursor.withMemoryRebound(to: encryption_info_command.self, capacity: 1, { $0.pointee })
                 return 0 != cryptCmd.cryptid
             }
 
-            cursor = cursor.advanced(by: stepSize)
+            cursor += Int(segCmd.cmdsize)
+            index += 1
         }
 
         return false
